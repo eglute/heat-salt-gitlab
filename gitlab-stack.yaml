@@ -1,0 +1,523 @@
+heat_template_version: 2013-05-23
+
+description: Deploys a salt master with gitlab stack cluster
+
+parameters:
+  keyname:
+    type: string
+    description: Key name for loggin in to instances
+  image:
+    type: string
+    description: Image name
+  floating-network-id:
+    type: string
+    description: UUID of the external network. The private network created by this stack will route to this network. Also any floating ip's needed by this stack will come this network. 
+  minion-count-gitlab:
+    type: number
+    default: 1
+    label: Number of Elasticsearch nodes
+    description: How many nodes will be required.
+  minion-flavor-gitlab:
+    type: string
+    default: m1.small
+    label: Flavor of gitlab servers
+    description: Flavor (image size) of gitlab servers to be created.
+  gitlab-from-email:
+    type: string
+    default: admin
+    label: User for Kibana
+    description: User for Kibana UUID
+  gitlab-hostname:
+    type: string
+    default: secrete
+    label: Passwd for Kibana
+    description: Pass for Kibana UUID
+    hidden: true
+
+resources:
+
+  # Random string to aid in naming things.
+  stack-string:
+    type: OS::Heat::RandomString
+    properties:
+      length: 6
+      sequence: lettersdigits
+
+  secret:
+    type: OS::Heat::RandomString
+    properties:
+      length: 32
+      sequence: lettersdigits
+
+  stack_security:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name:
+        str_replace:
+          template: gitlab-$stackstr-master
+          params:
+            $stackstr:
+              get_attr:
+                - stack-string
+                - value
+      rules:
+        - protocol: icmp
+        - protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+        - protocol: tcp
+          port_range_min: 443
+          port_range_max: 443
+        - protocol: tcp
+          port_range_min: 8080
+          port_range_max: 8080
+        - protocol: tcp
+          port_range_min: 80
+          port_range_max: 80
+        - protocol: tcp
+          port_range_min: 4505
+          port_range_max: 4506
+        - protocol: tcp
+          port_range_min: 5544
+          port_range_max: 5544
+        - protocol: tcp
+          port_range_min: 9200
+          port_range_max: 9200
+        - protocol: tcp
+          port_range_min: 9300
+          port_range_max: 9300
+
+  # Keypair for communicating between nodes within the stack.
+  # Will allow minions to ssh into the master and vice versa.
+  coms:
+    type: OS::Nova::KeyPair
+    properties:
+     save_private_key: true
+     name:
+       str_replace:
+         template: gitlab-$stackstr-coms
+         params:
+           $stackstr:
+             get_attr:
+               - stack-string
+               - value
+
+  net:
+    type: OS::Neutron::Net
+
+  subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      network_id:
+        get_resource: net
+      cidr: 10.10.10.0/24
+      dns_nameservers:
+        - 8.8.8.8
+        - 4.2.2.2
+
+  router:
+    type: OS::Neutron::Router
+    properties:
+      external_gateway_info:
+        network:
+          get_param: floating-network-id
+
+  interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router_id:
+        get_resource: router
+      subnet_id:
+        get_resource: subnet
+
+  master-ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id:
+        get_param: floating-network-id
+
+  master-port:
+    type: OS::Neutron::Port
+    properties:
+      security_groups:
+        - get_resource: stack_security
+      network_id:
+        get_resource: net
+
+  config-salt-master:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      inputs:
+        - name: public_key
+        - name: state_repos
+        - name: gitlab_from_email
+        - name: gitlab_hostname
+        - name: $stackstr
+      config: |
+        #!/bin/bash
+        set -ex
+        logdir=/var/log/heat-deployments
+        prefix=${logdir}/config-salt-master
+        mkdir -p $logdir
+        exec &> >(tee -a ${prefix}.log)
+        [ -e ${prefix}.ran ] && exit 0
+
+        chmod -R 0600 ${logdir}
+        chmod 0700 /root/.ssh/coms_rsa
+
+        # Add coms from minions to master
+        echo "$public_key" >> /root/.ssh/authorized_keys
+
+        # Install git
+        apt-get install -y git apache2-utils
+
+        ( cat | sudo tee /srv/pillar/gitlab.sls ) <<EOF
+        gitlab:
+          gitlab_hostname: $stackstr #TODO fix input
+          gitlab_from_email: $stackstr
+        EOF
+        chmod 0600 /srv/pillar/gitlab.sls
+
+        # Install salt master
+        echo "Install Salt Master"
+        curl -L http://bootstrap.saltstack.org | sh -s -- -M -N git v2014.1.13
+        mkdir -p /srv/salt
+        echo -e 'file_roots:\n  base:\n    - /srv/salt' >> /etc/salt/master
+
+        # Clone state/formula repos in state root directory
+        cd /srv/salt
+        while read -r line
+        do
+            if [ -n "$line" ]; then
+                git clone $line
+            fi
+        done <<< "$state_repos"
+        # Finally - Restart salt service
+        service salt-master restart
+        touch ${prefix}.ran
+
+  config-salt-minion:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      inputs:
+        - name: public_key
+        - name: master
+      config: |
+        #!/bin/bash
+        set -ex
+        logdir=/var/log/heat-deployments
+        prefix=${logdir}/config-salt-minion
+        mkdir -p $logdir
+        exec &> >(tee -a ${prefix}.log)
+        [ -e ${prefix}.ran ] && exit 0
+
+        chmod -R 0600 ${logdir}
+        chmod 0700 /root/.ssh/coms_rsa
+
+        # Add coms from minions to master
+        echo "$public_key" >> /root/.ssh/authorized_keys
+
+        # Install salt minion
+        curl -L http://bootstrap.saltstack.org | sh -s -- git v2014.1.13
+        echo master: $master >> /etc/salt/minion
+
+        service salt-minion restart
+
+        ssh-keyscan -H $master >> /root/.ssh/known_hosts
+
+        MASTER_PKI_PATH="/etc/salt/pki/master/minions/"
+        MASTER_PKI_PATH_PRE="/etc/salt/pki/master/minions_pre/"
+        MINION_PKI_PATH="/etc/salt/pki/minion/minion.pub"
+        HOSTNAME="$(python  -c 'import socket; print socket.getfqdn()')"
+
+        while [ ! -s ${MINION_PKI_PATH} ]; do
+            echo "Waiting for ${MINION_PKI_PATH} to have non-zero content."
+            sleep 2
+        done
+
+        cp $MINION_PKI_PATH /root/minion_key
+
+        scp -i /root/.ssh/coms_rsa /root/minion_key root@$master:/tmp/$HOSTNAME
+
+        ssh -i /root/.ssh/coms_rsa root@$master "mv /tmp/$HOSTNAME $MASTER_PKI_PATH$HOSTNAME; chmod 700 $MASTER_PKI_PATH$HOSTNAME; rm $MASTER_PKI_PATH_PRE$HOSTNAME"
+
+        service salt-minion restart
+        rm /root/minion_key
+        rm /root/.ssh/coms_rsa
+        touch ${prefix}.ran
+
+  deploy-salt-master:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        public_key:
+          get_attr:
+            - coms
+            - public_key
+        state_repos: |
+          https://github.com/eglute/gitlab-formula.git
+        gitlab_hostname:
+          - get_param: gitlab-hostname
+        gitlab_from_email:
+          - get_param: gitlab-from-email
+        stackstr:
+          get_attr:
+            - stack-string
+            - value
+      config:
+        get_resource: config-salt-master
+      server:
+        get_resource: master
+
+  master:
+    type: OS::Nova::Server
+    depends_on: interface
+    properties:
+      key_name:
+        get_param: keyname
+      image:
+        get_param: image
+      flavor: m1.small
+      name:
+        str_replace:
+          template: gitlab-$stackstr-master
+          params:
+            $stackstr:
+              get_attr:
+                - stack-string
+                - value
+      personality:
+        /root/.ssh/coms_rsa:
+          get_attr:
+            - coms
+            - private_key
+
+        /srv/salt/top.sls: |
+          base:
+            'roles:elasticsearch':
+              - match: grain
+              - gitlab-formula.gitlab.elasticsearch
+            'roles:logstash':
+              - match: grain
+              - gitlab-formula.gitlab.logstash
+            'roles:kibana':
+              - match: grain
+              - gitlab-formula.gitlab.kibana
+            'roles:haproxy':
+              - match: grain
+              - gitlab-formula.gitlab.haproxy
+
+        /srv/pillar/top.sls: |
+          base:
+            '*':
+              - app
+            'roles:elasticsearch':
+              - match: grain
+              - gitlab
+            'roles:logstash':
+              - match: grain
+              - gitlab
+            'roles:kibana':
+              - match: grain
+              - gitlab
+            'roles:haproxy':
+              - match: grain
+              - gitlab
+
+        /srv/pillar/app.sls: |
+          interfaces:
+            private: eth0
+            public: eth0
+          mine_functions:
+            network.ip_addrs: [eth0]
+            network.interfaces: []
+          mine_interval: 1
+
+      networks:
+        - port:
+            get_resource: master-port
+      user_data_format: SOFTWARE_CONFIG
+
+  master-floating-ip-ass:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id:
+        get_resource: master-ip
+      port_id:
+        get_resource: master-port
+
+  minion-group-gitlab:
+    type: OS::Heat::ResourceGroup
+    depends_on: deploy-salt-master
+    properties:
+      count:
+        get_param: minion-count-gitlab
+      resource_def:
+        type: Salt::Minion
+        properties:
+          flavor:
+            get_param: minion-flavor-gitlab
+          stack-prefix:
+            str_replace:
+              template: gitlab-$stackstr-server
+              params:
+                $stackstr:
+                  get_attr:
+                    - stack-string
+                    - value
+          private_key:
+            get_attr:
+              - coms
+              - private_key
+          public_key:
+            get_attr:
+              - coms
+              - public_key
+          image:
+            get_param: image
+          network:
+            get_resource: net
+          master:
+            get_attr:
+              - master
+              - first_address
+          minion-config:
+            get_resource: config-salt-minion
+          minion-roles: "elasticsearch, logstash, kibana"
+          security-group:
+            get_resource: stack_security
+
+  # Floating ip for haproxy node
+  minion-haproxy-ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id:
+        get_param: floating-network-id
+
+  # Port for haproxy node
+  minion-haproxy-port:
+    type: OS::Neutron::Port
+    properties:
+      security_groups:
+        - get_resource: stack_security
+      network_id:
+        get_resource: net
+
+  # haproxy minion
+  minion-haproxy:
+    type: OS::Nova::Server
+    depends_on: interface
+    properties:
+      flavor:
+        get_param: minion-flavor-gitlab
+      image:
+        get_param: image
+      name:
+        str_replace:
+          template: gitlab-$stackstr-haproxy
+          params:
+            $stackstr:
+              get_attr:
+                - stack-string
+                - value
+      personality:
+
+        # Private key for node to node communication
+        /root/.ssh/coms_rsa:
+          get_attr:
+            - coms
+            - private_key
+
+        # Set the salt role to haproxy
+        /etc/salt/grains: |
+          roles:
+            - haproxy
+
+      networks:
+        - port:
+            get_resource: minion-haproxy-port
+
+      # Needs to be SOFTWARE_CONFIG when using SoftwareConfigs
+      user_data_format: SOFTWARE_CONFIG
+
+  # Associate haproxy floating ip to the port
+  minion-haproxy-floating-ip-ass:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id:
+        get_resource: minion-haproxy-ip
+      port_id:
+        get_resource: minion-haproxy-port
+
+  # Deploys the salt-minion software config to the haproxy node.
+  deploy-haproxy:
+    type: OS::Heat::SoftwareDeployment
+    depends_on: deploy-salt-master
+    properties:
+      input_values:
+        public_key:
+          get_attr:
+            - coms
+            - public_key
+        master:
+          get_attr:
+            - master
+            - first_address
+      config:
+        get_resource: config-salt-minion
+      server:
+        get_resource: minion-haproxy
+
+  config-deploy:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      config: |
+        #!/bin/bash
+        set -ex
+        logdir=/var/log/heat-deployments
+        prefix=${logdir}/config-deploy
+        mkdir -p $logdir
+        exec &> >(tee -a ${prefix}.log)
+        [ -e ${prefix}.ran ] && exit 0
+        salt '*' saltutil.refresh_pillar
+        salt '*' mine.update
+        salt '*' state.highstate
+        touch ${prefix}.ran
+
+  deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      config:
+        get_resource: config-deploy
+      server:
+        get_resource: master
+    depends_on:
+      - deploy-salt-master
+      - minion-group-gitlab
+      - deploy-haproxy
+
+
+outputs:
+  master-ip:
+    value:
+      get_attr:
+        - master-ip
+        - floating_ip_address
+  minion-web-ips:
+    value:
+      get_attr:
+        - minion-group-gitlab
+        - minion-ip
+  minion-stdout:
+    value:
+      get_attr:
+        - minion-group-gitlab
+        - minion-stdout
+  minion-stderr:
+    value:
+      get_attr:
+        - minion-group-gitlab
+        - minion-stderr
