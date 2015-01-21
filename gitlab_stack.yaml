@@ -15,7 +15,7 @@ parameters:
   minion-count-gitlab:
     type: number
     default: 1
-    label: Number of Elasticsearch nodes
+    label: Number of Gitlab nodes
     description: How many nodes will be required.
   minion-flavor-gitlab:
     type: string
@@ -24,14 +24,14 @@ parameters:
     description: Flavor (image size) of gitlab servers to be created.
   gitlab-from-email:
     type: string
-    default: admin
-    label: User for Kibana
-    description: User for Kibana UUID
+    default: admin@example.com
+    label: Gitlab "from" email
+    description: Gitlab "from" email
   gitlab-hostname:
     type: string
-    default: secrete
-    label: Passwd for Kibana
-    description: Pass for Kibana UUID
+    default: example.com
+    label: Hostname for gitlab
+    description: Hostname for gitlab
     hidden: true
 
 resources:
@@ -296,33 +296,15 @@ resources:
 
         /srv/salt/top.sls: |
           base:
-            'roles:elasticsearch':
+            'roles:gitlab':
               - match: grain
-              - gitlab-formula.gitlab.elasticsearch
-            'roles:logstash':
-              - match: grain
-              - gitlab-formula.gitlab.logstash
-            'roles:kibana':
-              - match: grain
-              - gitlab-formula.gitlab.kibana
-            'roles:haproxy':
-              - match: grain
-              - gitlab-formula.gitlab.haproxy
-
+              - gitlab
+            
         /srv/pillar/top.sls: |
           base:
             '*':
               - app
-            'roles:elasticsearch':
-              - match: grain
-              - gitlab
-            'roles:logstash':
-              - match: grain
-              - gitlab
-            'roles:kibana':
-              - match: grain
-              - gitlab
-            'roles:haproxy':
+            'roles:gitlab':
               - match: grain
               - gitlab
 
@@ -385,7 +367,7 @@ resources:
               - first_address
           minion-config:
             get_resource: config-salt-minion
-          minion-roles: "elasticsearch, logstash, kibana"
+          minion-roles: "gitlab"
           security-group:
             get_resource: stack_security
 
@@ -405,43 +387,7 @@ resources:
       network_id:
         get_resource: net
 
-  # haproxy minion
-  minion-haproxy:
-    type: OS::Nova::Server
-    depends_on: interface
-    properties:
-      flavor:
-        get_param: minion-flavor-gitlab
-      image:
-        get_param: image
-      name:
-        str_replace:
-          template: gitlab-$stackstr-haproxy
-          params:
-            $stackstr:
-              get_attr:
-                - stack-string
-                - value
-      personality:
-
-        # Private key for node to node communication
-        /root/.ssh/coms_rsa:
-          get_attr:
-            - coms
-            - private_key
-
-        # Set the salt role to haproxy
-        /etc/salt/grains: |
-          roles:
-            - haproxy
-
-      networks:
-        - port:
-            get_resource: minion-haproxy-port
-
-      # Needs to be SOFTWARE_CONFIG when using SoftwareConfigs
-      user_data_format: SOFTWARE_CONFIG
-
+  
   # Associate haproxy floating ip to the port
   minion-haproxy-floating-ip-ass:
     type: OS::Neutron::FloatingIPAssociation
@@ -452,23 +398,7 @@ resources:
         get_resource: minion-haproxy-port
 
   # Deploys the salt-minion software config to the haproxy node.
-  deploy-haproxy:
-    type: OS::Heat::SoftwareDeployment
-    depends_on: deploy-salt-master
-    properties:
-      input_values:
-        public_key:
-          get_attr:
-            - coms
-            - public_key
-        master:
-          get_attr:
-            - master
-            - first_address
-      config:
-        get_resource: config-salt-minion
-      server:
-        get_resource: minion-haproxy
+ 
 
   config-deploy:
     type: OS::Heat::SoftwareConfig
@@ -497,7 +427,6 @@ resources:
     depends_on:
       - deploy-salt-master
       - minion-group-gitlab
-      - deploy-haproxy
 
 
 outputs:
