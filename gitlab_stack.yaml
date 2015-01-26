@@ -1,27 +1,43 @@
 heat_template_version: 2013-05-23
 
-description: Deploys a salt master with gitlab stack cluster
+description: |
+  Deploys Salt-master and a Gitlab server.
+  One Minion will be for gitlab server
+
+parameter_groups:
+- label: These are the paramters used to for creating a database user and access rights for that user.
+  description: These parameters are used for creating user-defined database users and access rights.
+  parameters:
+  - apps-network
 
 parameters:
+
   keyname:
     type: string
-    description: Key name for loggin in to instances
+    label: Salt-Master Keyname.
+    description: The name of the key that should be used to ssh into the Salt-Master.
+
   image:
     type: string
-    description: Image name
+    label: Image Name
+    description: Name of the existing image to use for every vm spun up by this stack. The image should have heat-config and heat-config-script baked in.
+
   floating-network-id:
     type: string
-    description: UUID of the external network. The private network created by this stack will route to this network. Also any floating ip's needed by this stack will come this network. 
-  minion-count-gitlab:
-    type: number
-    default: 1
-    label: Number of Gitlab nodes
-    description: How many nodes will be required.
-  minion-flavor-gitlab:
+    label: External Network UUID
+    description: UUID of the external network. The private network created by this stack will route to this network. Also any floating ip's needed by this stack will come this network.
+
+  apps-network:
     type: string
+    label: Network UUID of Apps network
+    description: The network UUID of the network your app (Magento, Drupal, etc.) are on.
+
+  flavor:
+    type: string
+    label: flavor
+    description: Flavor of DB instances
     default: m1.small
-    label: Flavor of gitlab servers
-    description: Flavor (image size) of gitlab servers to be created.
+
   gitlab-from-email:
     type: string
     default: admin@example.com
@@ -34,7 +50,10 @@ parameters:
     description: Hostname for gitlab
     hidden: true
 
+
+
 resources:
+
 
   # Random string to aid in naming things.
   stack-string:
@@ -43,68 +62,74 @@ resources:
       length: 6
       sequence: lettersdigits
 
+  # Will be used to generate a random password
+  # 32 characters long consisting of alpha numeric characters
   secret:
     type: OS::Heat::RandomString
     properties:
       length: 32
       sequence: lettersdigits
 
-  stack_security:
+  admin_password:
+    type: OS::Heat::RandomString
+    properties:
+      length: 10
+      sequence: lettersdigits
+
+  #This is the security group for the haproxy node to allow mysql, web, icmp, and  ssh traffic
+  secgroup:
     type: OS::Neutron::SecurityGroup
     properties:
       name:
         str_replace:
-          template: gitlab-$stackstr-master
+          template: gitlab-$stackstr-secgroup
           params:
             $stackstr:
               get_attr:
                 - stack-string
                 - value
+      description: Ping, SSH, MySQL, web, salt, and galera replication traffic is allowed
       rules:
-        - protocol: icmp
-        - protocol: tcp
-          port_range_min: 22
-          port_range_max: 22
-        - protocol: tcp
-          port_range_min: 443
-          port_range_max: 443
-        - protocol: tcp
-          port_range_min: 8080
-          port_range_max: 8080
-        - protocol: tcp
-          port_range_min: 80
-          port_range_max: 80
-        - protocol: tcp
-          port_range_min: 4505
-          port_range_max: 4506
-        - protocol: tcp
-          port_range_min: 5544
-          port_range_max: 5544
-        - protocol: tcp
-          port_range_min: 9200
-          port_range_max: 9200
-        - protocol: tcp
-          port_range_min: 9300
-          port_range_max: 9300
+      - protocol: icmp
+      - protocol: tcp
+        port_range_min: 22
+        port_range_max: 22
+      - protocol: tcp
+        port_range_min: 3306
+        port_range_max: 3306
+      - protocol: tcp
+        port_range_min: 13306
+        port_range_max: 13306
+      - protocol: tcp
+        port_range_min: 4505
+        port_range_max: 4506
+      - protocol: tcp
+        port_range_min: 4567
+        port_range_max: 4568
+      - protocol: tcp
+        port_range_min: 4444
+        port_range_max: 4444
 
   # Keypair for communicating between nodes within the stack.
   # Will allow minions to ssh into the master and vice versa.
   coms:
     type: OS::Nova::KeyPair
     properties:
-     save_private_key: true
-     name:
-       str_replace:
-         template: gitlab-$stackstr-coms
-         params:
-           $stackstr:
-             get_attr:
-               - stack-string
-               - value
+      name:
+        str_replace:
+          template: gitlab-$stackstr-coms
+          params:
+            $stackstr:
+              get_attr:
+                - stack-string
+                - value
+      save_private_key: true
 
+  # Private network for this stack
   net:
     type: OS::Neutron::Net
 
+  # Private subnet for this stack
   subnet:
     type: OS::Neutron::Subnet
     properties:
@@ -115,6 +140,7 @@ resources:
         - 8.8.8.8
         - 4.2.2.2
 
+  # Routes the private network to the external network.
   router:
     type: OS::Neutron::Router
     properties:
@@ -122,6 +148,7 @@ resources:
         network:
           get_param: floating-network-id
 
+  # Router interface
   interface:
     type: OS::Neutron::RouterInterface
     properties:
@@ -130,20 +157,32 @@ resources:
       subnet_id:
         get_resource: subnet
 
+  # One floating ip for the salt-master node
   master-ip:
     type: OS::Neutron::FloatingIP
     properties:
       floating_network_id:
         get_param: floating-network-id
 
+  # One port for the salt-master node
   master-port:
     type: OS::Neutron::Port
     properties:
-      security_groups:
-        - get_resource: stack_security
       network_id:
         get_resource: net
+      security_groups:
+        - get_resource: secgroup
+  apps-net-port:
+    type: OS::Neutron::Port
+    properties:
+      network_id:
+        get_param: apps-network
+      security_groups:
+        - {get_resource: secgroup}
 
+  # Software configuration script for the salt-master node
+  # Installs salt-master, sets permission on some personality files
+  # and uses git to clone any provided state/formula repos
   config-salt-master:
     type: OS::Heat::SoftwareConfig
     properties:
@@ -151,9 +190,6 @@ resources:
       inputs:
         - name: public_key
         - name: state_repos
-        - name: gitlab_from_email
-        - name: gitlab_hostname
-        - name: $stackstr
       config: |
         #!/bin/bash
         set -ex
@@ -170,33 +206,38 @@ resources:
         echo "$public_key" >> /root/.ssh/authorized_keys
 
         # Install git
-        apt-get install -y git apache2-utils
-
-        ( cat | sudo tee /srv/pillar/gitlab.sls ) <<EOF
-        gitlab:
-          gitlab_hostname: $stackstr #TODO fix input
-          gitlab_from_email: $stackstr
-        EOF
-        chmod 0600 /srv/pillar/gitlab.sls
+        apt-get install -y git
 
         # Install salt master
         echo "Install Salt Master"
         curl -L http://bootstrap.saltstack.org | sh -s -- -M -N git v2014.1.13
         mkdir -p /srv/salt
+        
         echo -e 'file_roots:\n  base:\n    - /srv/salt' >> /etc/salt/master
 
         # Clone state/formula repos in state root directory
-        cd /srv/salt
+        cd /srv/salt        
         while read -r line
         do
-            if [ -n "$line" ]; then
-                git clone $line
-            fi
+          if [ -n "$line" ]; then
+            git clone $line
+          fi
         done <<< "$state_repos"
+        ( cat | sudo tee /srv/pillar/gitlab.sls ) <<EOF
+        gitlab:
+          gitlab_hostname: $gitlab_hostname
+          gitlab_from_email: $gitlab_from_email
+        EOF
+        chmod 0600 /srv/pillar/gitlab.sls
+
         # Finally - Restart salt service
         service salt-master restart
+
         touch ${prefix}.ran
 
+  # Software configuration for salt minion
+  # Installs salt-minion, sets up authentication from minion to master,
+  # and sets permissions of any personality files.
   config-salt-minion:
     type: OS::Heat::SoftwareConfig
     properties:
@@ -246,8 +287,12 @@ resources:
         service salt-minion restart
         rm /root/minion_key
         rm /root/.ssh/coms_rsa
+        /sbin/ifconfig -a | /usr/bin/awk '/eth.*Ethernet/ {print $1}' | while read E; do /usr/bin/sudo /sbin/dhclient $E; done
         touch ${prefix}.ran
 
+  # Software deployment for salt-master. Deploys the salt-master software
+  # configuration.
+  # Also lists the git repos necessary to make the galera stack work.
   deploy-salt-master:
     type: OS::Heat::SoftwareDeployment
     properties:
@@ -257,20 +302,18 @@ resources:
             - coms
             - public_key
         state_repos: |
-          https://github.com/eglute/gitlab-formula.git
+          https://github.com/eglute/gitlab-formula
         gitlab_hostname:
           - get_param: gitlab-hostname
         gitlab_from_email:
           - get_param: gitlab-from-email
-        stackstr:
-          get_attr:
-            - stack-string
-            - value
       config:
         get_resource: config-salt-master
       server:
         get_resource: master
 
+  # The salt master instance
+  # Should have one floating ip
   master:
     type: OS::Nova::Server
     depends_on: interface
@@ -298,7 +341,7 @@ resources:
           base:
             'roles:gitlab':
               - match: grain
-              - gitlab
+              - gitlab-formula
             
         /srv/pillar/top.sls: |
           base:
@@ -322,6 +365,7 @@ resources:
             get_resource: master-port
       user_data_format: SOFTWARE_CONFIG
 
+  # Associate the master floating ip to the master port
   master-floating-ip-ass:
     type: OS::Neutron::FloatingIPAssociation
     properties:
@@ -330,76 +374,81 @@ resources:
       port_id:
         get_resource: master-port
 
-  minion-group-gitlab:
-    type: OS::Heat::ResourceGroup
-    depends_on: deploy-salt-master
-    properties:
-      count:
-        get_param: minion-count-gitlab
-      resource_def:
-        type: Salt::Minion
-        properties:
-          flavor:
-            get_param: minion-flavor-gitlab
-          stack-prefix:
-            str_replace:
-              template: gitlab-$stackstr-server
-              params:
-                $stackstr:
-                  get_attr:
-                    - stack-string
-                    - value
-          private_key:
-            get_attr:
-              - coms
-              - private_key
-          public_key:
-            get_attr:
-              - coms
-              - public_key
-          image:
-            get_param: image
-          network:
-            get_resource: net
-          master:
-            get_attr:
-              - master
-              - first_address
-          minion-config:
-            get_resource: config-salt-minion
-          minion-roles: "gitlab"
-          security-group:
-            get_resource: stack_security
-
-  # Floating ip for haproxy node
-  minion-haproxy-ip:
-    type: OS::Neutron::FloatingIP
-    properties:
-      floating_network_id:
-        get_param: floating-network-id
-
   # Port for haproxy node
   minion-haproxy-port:
     type: OS::Neutron::Port
     properties:
-      security_groups:
-        - get_resource: stack_security
       network_id:
         get_resource: net
+      security_groups:
+        - get_resource: secgroup
 
-  
-  # Associate haproxy floating ip to the port
-  minion-haproxy-floating-ip-ass:
-    type: OS::Neutron::FloatingIPAssociation
+  # haproxy minion
+  minion-haproxy:
+    type: OS::Nova::Server
+    depends_on: interface
     properties:
-      floatingip_id:
-        get_resource: minion-haproxy-ip
-      port_id:
-        get_resource: minion-haproxy-port
+      flavor:
+        get_param: flavor
+      image:
+        get_param: image
+      name:
+        str_replace:
+          template: gitlab-$stackstr-haproxy
+          params:
+            $stackstr:
+              get_attr:
+                - stack-string
+                - value
+      personality:
+
+        # Private key for node to node communication
+        /root/.ssh/coms_rsa:
+          get_attr:
+            - coms
+            - private_key
+
+        # Set the salt role to haproxy
+        /etc/salt/grains: |
+          roles:
+            - gitlab
+
+      networks:
+        - port:
+            get_resource: minion-haproxy-port
+        - port:
+            get_resource: apps-net-port
+
+      # Needs to be SOFTWARE_CONFIG when using SoftwareConfigs
+      user_data_format: SOFTWARE_CONFIG
+
 
   # Deploys the salt-minion software config to the haproxy node.
- 
+  deploy-haproxy:
+    type: OS::Heat::SoftwareDeployment
+    depends_on: deploy-salt-master
+    properties:
+      input_values:
+        public_key:
+          get_attr:
+            - coms
+            - public_key
+        master:
+          get_attr:
+            - master
+            - first_address
+      config:
+        get_resource: config-salt-minion
+      server:
+        get_resource: minion-haproxy
 
+  
+  
+  
+
+  
+  # SoftwareConfig that is to run on master.
+  # Executes a salt state.highstate on all attached minions.
   config-deploy:
     type: OS::Heat::SoftwareConfig
     properties:
@@ -417,6 +466,9 @@ resources:
         salt '*' state.highstate
         touch ${prefix}.ran
 
+  # Deploys the the deploy softwareconfig
+  # All minions should be spun up and running salt-minion
+  # before executing this deployment.
   deploy:
     type: OS::Heat::SoftwareDeployment
     properties:
@@ -426,8 +478,7 @@ resources:
         get_resource: master
     depends_on:
       - deploy-salt-master
-      - minion-group-gitlab
-
+      - deploy-haproxy
 
 outputs:
   master-ip:
@@ -435,18 +486,11 @@ outputs:
       get_attr:
         - master-ip
         - floating_ip_address
-  minion-web-ips:
+
+  haproxy-ip:
     value:
       get_attr:
-        - minion-group-gitlab
-        - minion-ip
-  minion-stdout:
-    value:
-      get_attr:
-        - minion-group-gitlab
-        - minion-stdout
-  minion-stderr:
-    value:
-      get_attr:
-        - minion-group-gitlab
-        - minion-stderr
+        - apps-net-port
+        - fixed_ips
+        - 0
+        - ip_address
