@@ -2,7 +2,6 @@ heat_template_version: 2013-05-23
 
 description: |
   Deploys Salt-master and a Gitlab server.
-  One Minion will be for gitlab server
 
 parameter_groups:
 - label: These are the paramters used to for creating a database user and access rights for that user.
@@ -30,12 +29,12 @@ parameters:
   apps-network:
     type: string
     label: Network UUID of Apps network
-    description: The network UUID of the network your app (Magento, Drupal, etc.) are on.
+    description: The network UUID of the network your apps accessing gitlab server are on.
 
   flavor:
     type: string
     label: flavor
-    description: Flavor of DB instances
+    description: Flavor of Gitlab instances
     default: m1.small
 
   gitlab-from-email:
@@ -50,10 +49,7 @@ parameters:
     description: Hostname for gitlab
     hidden: true
 
-
-
 resources:
-
 
   # Random string to aid in naming things.
   stack-string:
@@ -88,27 +84,46 @@ resources:
               get_attr:
                 - stack-string
                 - value
-      description: Ping, SSH, MySQL, web, salt, and galera replication traffic is allowed
+      description: Ping, SSH, Rails, SMTP, mail, IMAP, POP3 traffic is allowed
       rules:
       - protocol: icmp
       - protocol: tcp
         port_range_min: 22
         port_range_max: 22
       - protocol: tcp
-        port_range_min: 3306
-        port_range_max: 3306
+        port_range_min: 80
+        port_range_max: 80
       - protocol: tcp
-        port_range_min: 13306
-        port_range_max: 13306
+        port_range_min: 443
+        port_range_max: 443
+      - protocol: tcp
+        port_range_min: 8080
+        port_range_max: 8080
+      - protocol: tcp
+        port_range_min: 465
+        port_range_max: 465
+      - protocol: tcp
+        port_range_min: 456
+        port_range_max: 456
+      - protocol: tcp
+        port_range_min: 25
+        port_range_max: 25
+      - protocol: tcp
+        port_range_min: 587
+        port_range_max: 587
+      - protocol: tcp
+        port_range_min: 143
+        port_range_max: 143
+      - protocol: tcp
+        port_range_min: 110
+        port_range_max: 110
+      - protocol: tcp
+        port_range_min: 995
+        port_range_max: 995
       - protocol: tcp
         port_range_min: 4505
         port_range_max: 4506
-      - protocol: tcp
-        port_range_min: 4567
-        port_range_max: 4568
-      - protocol: tcp
-        port_range_min: 4444
-        port_range_max: 4444
+      
 
   # Keypair for communicating between nodes within the stack.
   # Will allow minions to ssh into the master and vice versa.
@@ -292,7 +307,7 @@ resources:
 
   # Software deployment for salt-master. Deploys the salt-master software
   # configuration.
-  # Also lists the git repos necessary to make the galera stack work.
+  # Also lists the git repos necessary.
   deploy-salt-master:
     type: OS::Heat::SoftwareDeployment
     properties:
@@ -394,7 +409,7 @@ resources:
         get_param: image
       name:
         str_replace:
-          template: gitlab-$stackstr-haproxy
+          template: gitlab-$stackstr-server
           params:
             $stackstr:
               get_attr:
@@ -441,11 +456,6 @@ resources:
         get_resource: config-salt-minion
       server:
         get_resource: minion-haproxy
-
-  
-  
-  
-
   
   # SoftwareConfig that is to run on master.
   # Executes a salt state.highstate on all attached minions.
