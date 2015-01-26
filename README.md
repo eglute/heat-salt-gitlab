@@ -1,4 +1,3 @@
-# heat-salt-gitlab
 Description
 ===========
 
