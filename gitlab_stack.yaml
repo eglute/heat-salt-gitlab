@@ -3,12 +3,6 @@ heat_template_version: 2013-05-23
 description: |
   Deploys Salt-master and a Gitlab server.
 
-parameter_groups:
-- label: These are the paramters used to for creating a database user and access rights for that user.
-  description: These parameters are used for creating user-defined database users and access rights.
-  parameters:
-  - apps-network
-
 parameters:
 
   keyname:
@@ -26,10 +20,6 @@ parameters:
     label: External Network UUID
     description: UUID of the external network. The private network created by this stack will route to this network. Also any floating ip's needed by this stack will come this network.
 
-  apps-network:
-    type: string
-    label: Network UUID of Apps network
-    description: The network UUID of the network your apps accessing gitlab server are on.
 
   flavor:
     type: string
@@ -178,6 +168,13 @@ resources:
     properties:
       floating_network_id:
         get_param: floating-network-id
+        
+  # One floating ip for the salt-master node
+  gitlab-ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id:
+        get_param: floating-network-id
 
   # One port for the salt-master node
   master-port:
@@ -187,13 +184,14 @@ resources:
         get_resource: net
       security_groups:
         - get_resource: secgroup
-  apps-net-port:
+        
+  gitlab-port:
     type: OS::Neutron::Port
     properties:
       network_id:
-        get_param: apps-network
+        get_resource: net
       security_groups:
-        - {get_resource: secgroup}
+        - get_resource: secgroup
 
   # Software configuration script for the salt-master node
   # Installs salt-master, sets permission on some personality files
@@ -388,16 +386,16 @@ resources:
         get_resource: master-ip
       port_id:
         get_resource: master-port
-
-  # Port for haproxy node
-  minion-haproxy-port:
-    type: OS::Neutron::Port
+        
+  # Associate the master floating ip to the master port
+  gitlab-floating-ip-ass:
+    type: OS::Neutron::FloatingIPAssociation
     properties:
-      network_id:
-        get_resource: net
-      security_groups:
-        - get_resource: secgroup
-
+      floatingip_id:
+        get_resource: gitlab-ip
+      port_id:
+        get_resource: gitlab-port      
+  
   # haproxy minion
   minion-haproxy:
     type: OS::Nova::Server
@@ -430,9 +428,7 @@ resources:
 
       networks:
         - port:
-            get_resource: minion-haproxy-port
-        - port:
-            get_resource: apps-net-port
+            get_resource: gitlab-port
 
       # Needs to be SOFTWARE_CONFIG when using SoftwareConfigs
       user_data_format: SOFTWARE_CONFIG
@@ -497,10 +493,4 @@ outputs:
         - master-ip
         - floating_ip_address
 
-  haproxy-ip:
-    value:
-      get_attr:
-        - apps-net-port
-        - fixed_ips
-        - 0
-        - ip_address
+
