@@ -61,7 +61,7 @@ resources:
       length: 10
       sequence: lettersdigits
 
-  #This is the security group for the haproxy node to allow mysql, web, icmp, and  ssh traffic
+  #This is the security group for the gitlab node to allow mysql, web, icmp, and  ssh traffic
   secgroup:
     type: OS::Neutron::SecurityGroup
     properties:
@@ -402,8 +402,8 @@ resources:
       port_id:
         get_resource: gitlab-port      
   
-  # haproxy minion
-  minion-haproxy:
+  # gitlab minion
+  minion-gitlab:
     type: OS::Nova::Server
     depends_on: interface
     properties:
@@ -427,7 +427,7 @@ resources:
             - coms
             - private_key
 
-        # Set the salt role to haproxy
+        # Set the salt role to gitlab
         /etc/salt/grains: |
           roles:
             - gitlab
@@ -440,8 +440,8 @@ resources:
       user_data_format: SOFTWARE_CONFIG
 
 
-  # Deploys the salt-minion software config to the haproxy node.
-  deploy-haproxy:
+  # Deploys the salt-minion software config to the gitlab node.
+  deploy-gitlab:
     type: OS::Heat::SoftwareDeployment
     depends_on: deploy-salt-master
     properties:
@@ -457,7 +457,7 @@ resources:
       config:
         get_resource: config-salt-minion
       server:
-        get_resource: minion-haproxy
+        get_resource: minion-gitlab
   
   # SoftwareConfig that is to run on master.
   # Executes a salt state.highstate on all attached minions.
@@ -490,7 +490,7 @@ resources:
         get_resource: master
     depends_on:
       - deploy-salt-master
-      - deploy-haproxy
+      - deploy-gitlab
 
 outputs:
   master-ip:
