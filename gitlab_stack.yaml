@@ -37,7 +37,6 @@ parameters:
     default: example.com
     label: Hostname for gitlab
     description: Hostname for gitlab
-    hidden: true
 
 resources:
 
@@ -236,12 +235,8 @@ resources:
             git clone $line
           fi
         done <<< "$state_repos"
-        ( cat | sudo tee /srv/pillar/gitlab.sls ) <<EOF
-        gitlab:
-          gitlab_hostname: $gitlab_hostname
-          gitlab_from_email: $gitlab_from_email
-        EOF
-        chmod 0600 /srv/pillar/gitlab.sls
+
+        
 
         # Finally - Restart salt service
         service salt-master restart
@@ -316,10 +311,6 @@ resources:
             - public_key
         state_repos: |
           https://github.com/eglute/gitlab-formula
-        gitlab_hostname:
-          - get_param: gitlab-hostname
-        gitlab_from_email:
-          - get_param: gitlab-from-email
       config:
         get_resource: config-salt-master
       server:
@@ -372,7 +363,22 @@ resources:
             network.ip_addrs: [eth0]
             network.interfaces: []
           mine_interval: 1
-
+          
+        /srv/pillar/gitlab.sls: 
+          str_replace:
+            template: |
+              gitlab:
+                gitlab_hostname: $gitlabhostname
+                gitlab_from_email: $gitlabfromemail
+            params:
+              $gitlabhostname:
+                get_param:
+                  - gitlab-hostname
+                
+              $gitlabfromemail:
+                get_param:
+                  - gitlab-from-email    
+                  
       networks:
         - port:
             get_resource: master-port
