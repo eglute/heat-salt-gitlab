@@ -58,7 +58,6 @@ heat stack-create hadoop-stack -f gitlab_stack.yaml \
 ```
 All the required parameters are as follows:
 ```
-    "apps-network": Network UUID of application network
     "image": Image name
     "floating-network-id": UUID of the external network. The private network created by this stack will route to this network. Also, any floating ip's needed by this stack will come this network.
     "keyname": Key name for loggin in to instances
